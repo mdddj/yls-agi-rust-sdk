@@ -188,6 +188,36 @@ Use `ClientBuilder` or provider constructors to override auth mode if your gatew
 
 ## Model Enums
 
-- OpenAI: `OpenAiModel::Gpt41`, `OpenAiModel::Gpt5Mini`, `OpenAiModel::Gpt51`, `OpenAiModel::Gpt51Chat`, `OpenAiModel::O4MiniDeepResearch`, `OpenAiModel::DeepseekV32Exp`, `OpenAiModel::Gpt52`, `OpenAiModel::Gpt52Chat`, `OpenAiModel::Gpt54`
-- Claude: `ClaudeModel::ClaudeHaiku4520251001`, `ClaudeModel::ClaudeSonnet4520250929`, `ClaudeModel::ClaudeOpus4520251101`, `ClaudeModel::ClaudeSonnet46`, `ClaudeModel::ClaudeOpus46`
-- Gemini: `GeminiModel::Gemini3ProPreview`, `GeminiModel::Gemini3FlashPreview`, `GeminiModel::Gemini25FlashImage`, `GeminiModel::Gemini3ProImagePreview`, `GeminiModel::Gemini31ProPreview`
+### OpenAI
+
+| Enum | Model String | 文档备注 |
+| --- | --- | --- |
+| `OpenAiModel::Gpt41` | `gpt-4.1` | 旗舰模型 |
+| `OpenAiModel::Gpt5Mini` | `gpt-5-mini` | 快速 GPT-5 |
+| `OpenAiModel::Gpt51` | `gpt-5.1` | 旗舰模型 |
+| `OpenAiModel::Gpt51Chat` | `gpt-5.1-chat` | Chat 优化模型 |
+| `OpenAiModel::O4MiniDeepResearch` | `o4-mini-deep-research` | 更实惠的深度研究模型 |
+| `OpenAiModel::DeepseekV32Exp` | `deepseek-v3.2-exp` | deepseek 系列最新模型 |
+| `OpenAiModel::Gpt52` | `gpt-5.2` | 无额外备注 |
+| `OpenAiModel::Gpt52Chat` | `gpt-5.2-chat` | 快速 |
+| `OpenAiModel::Gpt54` | `gpt-5.4` | 旗舰模型 |
+
+### Claude
+
+| Enum | Model String | 文档备注 |
+| --- | --- | --- |
+| `ClaudeModel::ClaudeHaiku4520251001` | `claude-haiku-4-5-20251001` | 快速经济模型 |
+| `ClaudeModel::ClaudeSonnet4520250929` | `claude-sonnet-4-5-20250929` | 旗舰模型 |
+| `ClaudeModel::ClaudeOpus4520251101` | `claude-opus-4-5-20251101` | 高级模型 |
+| `ClaudeModel::ClaudeSonnet46` | `claude-sonnet-4-6` | 旗舰模型 |
+| `ClaudeModel::ClaudeOpus46` | `claude-opus-4-6` | 高级模型 |
+
+### Gemini
+
+| Enum | Model String | 文档备注 |
+| --- | --- | --- |
+| `GeminiModel::Gemini3ProPreview` | `gemini-3-pro-preview` | 高级模型 |
+| `GeminiModel::Gemini3FlashPreview` | `gemini-3-flash-preview` | Gemini3 快速 |
+| `GeminiModel::Gemini25FlashImage` | `gemini-2.5-flash-image` | Nano Banana |
+| `GeminiModel::Gemini3ProImagePreview` | `gemini-3-pro-image-preview` | Nano Banana Pro |
+| `GeminiModel::Gemini31ProPreview` | `gemini-3.1-pro-preview` | 高级模型 |
