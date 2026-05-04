@@ -174,6 +174,14 @@ async fn gemini_image_generation_is_parsed() {
             "/gemini/v1beta/models/gemini-2.5-flash-image:generateContent",
         ))
         .and(header("x-goog-api-key", "test-key"))
+        .and(body_json(json!({
+            "contents": [{
+                "parts": [{"text": "draw a cat"}]
+            }],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"]
+            }
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "candidates": [{
                 "content": {

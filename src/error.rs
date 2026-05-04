@@ -14,12 +14,24 @@ pub enum Error {
     Url(#[from] url::ParseError),
     #[error("stream parse error: {0}")]
     Stream(String),
-    #[error("provider error: {0}")]
-    Provider(String),
+    #[error("provider `{provider}` error: {message}")]
+    Provider {
+        provider: &'static str,
+        message: String,
+    },
     #[error("missing environment variable: {0}")]
     MissingEnvVar(&'static str),
     #[error("unsupported configuration: {0}")]
     UnsupportedConfig(String),
     #[error("task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
+}
+
+impl Error {
+    pub fn provider(provider: &'static str, message: impl Into<String>) -> Self {
+        Self::Provider {
+            provider,
+            message: message.into(),
+        }
+    }
 }

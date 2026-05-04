@@ -129,7 +129,7 @@ impl OpenAiClient {
             }
             openai
                 .chat_completion_create(&body)
-                .map_err(|err| Error::Provider(err.to_string()))
+                .map_err(|err| Error::provider("openai", err.to_string()))
         })
         .await??;
 

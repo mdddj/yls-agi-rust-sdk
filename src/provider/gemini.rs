@@ -10,13 +10,15 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::{StreamExt, TryStreamExt};
 use gemini_rust::{
-    Gemini, GenerationConfig, GenerationResponse, Message as GeminiMessage,
-    Model as GeminiApiModel, Part,
+    Gemini, GenerationConfig, GenerationResponse, Message as GeminiMessage, Model as GeminiApiModel,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::time::{Duration, sleep};
 use url::Url;
 
 const DEFAULT_API_KEY_ENV: &str = "YLS_AGI_KEY";
+const IMAGE_RETRY_DELAYS_MS: [u64; 3] = [0, 250, 1000];
 
 #[derive(Debug, Clone)]
 pub struct GeminiClient {
@@ -64,7 +66,7 @@ impl GeminiClient {
             GeminiApiModel::Custom(format!("models/{model}")),
             self.config.base_url.clone(),
         )
-        .map_err(|err| crate::error::Error::Provider(err.to_string()))
+        .map_err(|err| Error::provider("gemini", err.to_string()))
     }
 
     fn build_messages(messages: &[ChatMessage]) -> Vec<GeminiMessage> {
@@ -107,7 +109,7 @@ impl GeminiClient {
         builder
             .execute()
             .await
-            .map_err(|err| crate::error::Error::Provider(err.to_string()))
+            .map_err(|err| Error::provider("gemini", err.to_string()))
     }
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
@@ -132,28 +134,126 @@ impl GeminiClient {
             )));
         }
 
-        let client = self.build_client(&request.model)?;
-        let mut builder = client
-            .generate_content()
-            .with_user_message(request.prompt)
-            .with_generation_config(GenerationConfig {
-                temperature: request.options.temperature,
-                top_p: request.options.top_p,
-                max_output_tokens: request.options.max_tokens.map(|value| value as i32),
-                stop_sequences: request.options.stop,
-                ..Default::default()
-            });
-
-        if let Some(system_prompt) = request.system_prompt {
-            builder = builder.with_system_prompt(system_prompt);
-        }
-
-        let response = builder
-            .execute()
-            .await
-            .map_err(|err| crate::error::Error::Provider(err.to_string()))?;
+        let wire_request = Self::build_image_request(request);
+        let response = self
+            .execute_image_with_retry(&model_name, &wire_request)
+            .await?;
 
         Self::normalize_image_response(response)
+    }
+
+    async fn execute_image_with_retry(
+        &self,
+        model: &str,
+        body: &GeminiImageWireRequest,
+    ) -> Result<Value> {
+        let mut last_error = None;
+
+        for delay_ms in IMAGE_RETRY_DELAYS_MS {
+            if delay_ms > 0 {
+                sleep(Duration::from_millis(delay_ms)).await;
+            }
+
+            match self.send_image_request(model, body).await {
+                Ok(response) => return Ok(response),
+                Err(ImageRequestFailure::Retryable(err)) => last_error = Some(err),
+                Err(ImageRequestFailure::Fatal(err)) => return Err(err),
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| Error::provider("gemini", "image generation failed after retries")))
+    }
+
+    fn build_image_request(request: GeminiImageRequest) -> GeminiImageWireRequest {
+        let generation_config = GeminiImageWireGenerationConfig {
+            temperature: request.options.temperature,
+            top_p: request.options.top_p,
+            max_output_tokens: request.options.max_tokens,
+            stop_sequences: request.options.stop,
+            response_modalities: vec!["TEXT".to_string(), "IMAGE".to_string()],
+        };
+
+        GeminiImageWireRequest {
+            contents: vec![GeminiImageWireContent {
+                parts: vec![GeminiImageWirePart {
+                    text: request.prompt,
+                }],
+            }],
+            system_instruction: request
+                .system_prompt
+                .map(|system_prompt| GeminiImageWireContent {
+                    parts: vec![GeminiImageWirePart {
+                        text: system_prompt,
+                    }],
+                }),
+            generation_config: Some(generation_config),
+        }
+    }
+
+    async fn send_image_request(
+        &self,
+        model: &str,
+        body: &GeminiImageWireRequest,
+    ) -> std::result::Result<Value, ImageRequestFailure> {
+        let url = self
+            .config
+            .base_url
+            .join(&format!("models/{model}:generateContent"))
+            .map_err(|err| {
+                ImageRequestFailure::Fatal(Error::provider("gemini", err.to_string()))
+            })?;
+
+        let request = self.config.auth_mode.apply(
+            self.config.http_client.post(url).json(body),
+            &self.config.api_key,
+        );
+
+        let response = request.send().await.map_err(|err| {
+            ImageRequestFailure::Retryable(Error::provider(
+                "gemini",
+                format!("image request transport error: {err}"),
+            ))
+        })?;
+        let status = response.status();
+        let response_body = response.text().await.map_err(|err| {
+            let error = Error::provider(
+                "gemini",
+                format!("failed to read image response body (status {status}): {err}"),
+            );
+
+            if is_retryable_status(status) {
+                ImageRequestFailure::Retryable(error)
+            } else {
+                ImageRequestFailure::Fatal(error)
+            }
+        })?;
+
+        if !status.is_success() {
+            let error = Error::provider(
+                "gemini",
+                format!(
+                    "image request failed with status {status}: {}",
+                    truncate_error_body(&response_body)
+                ),
+            );
+
+            return Err(if is_retryable_status(status) {
+                ImageRequestFailure::Retryable(error)
+            } else {
+                ImageRequestFailure::Fatal(error)
+            });
+        }
+
+        serde_json::from_str(&response_body).map_err(|err| {
+            ImageRequestFailure::Fatal(Error::provider(
+                "gemini",
+                format!(
+                    "failed to decode image generation response: {err}; body: {}",
+                    truncate_error_body(&response_body)
+                ),
+            ))
+        })
     }
 
     fn normalize(response: GenerationResponse) -> ChatResponse {
@@ -179,23 +279,33 @@ impl GeminiClient {
         }
     }
 
-    fn normalize_image_response(response: GenerationResponse) -> Result<GeminiImageResponse> {
-        let model = response.model_version.clone();
-        let raw = serde_json::to_value(&response).ok();
+    fn normalize_image_response(raw: Value) -> Result<GeminiImageResponse> {
+        let response: GeminiImageWireResponse =
+            serde_json::from_value(raw.clone()).map_err(|err| {
+                Error::provider(
+                    "gemini",
+                    format!("failed to normalize image generation response: {err}"),
+                )
+            })?;
+        let model = response.model_version;
         let mut text = Vec::new();
         let mut images = Vec::new();
 
-        for candidate in &response.candidates {
-            if let Some(parts) = &candidate.content.parts {
+        for candidate in response.candidates {
+            if let Some(content) = candidate.content
+                && let Some(parts) = content.parts
+            {
                 for part in parts {
                     match part {
-                        Part::Text { text: value, .. } => text.push(value.clone()),
-                        Part::InlineData { inline_data, .. } => images.push(GeneratedImage {
-                            mime_type: inline_data.mime_type.clone(),
-                            data_base64: inline_data.data.clone(),
-                            bytes: BASE64.decode(&inline_data.data)?,
-                        }),
-                        _ => {}
+                        GeminiImageWireResponsePart::Text { text: value } => text.push(value),
+                        GeminiImageWireResponsePart::InlineData { inline_data } => {
+                            images.push(GeneratedImage {
+                                mime_type: inline_data.mime_type.clone(),
+                                data_base64: inline_data.data.clone(),
+                                bytes: BASE64.decode(&inline_data.data)?,
+                            })
+                        }
+                        GeminiImageWireResponsePart::Other => {}
                     }
                 }
             }
@@ -205,7 +315,7 @@ impl GeminiClient {
             model,
             text,
             images,
-            raw,
+            raw: Some(raw),
         })
     }
 }
@@ -215,6 +325,102 @@ impl Default for GeminiClient {
         Self::from_env().unwrap_or_else(|err| {
             panic!("failed to build default GeminiClient from {DEFAULT_API_KEY_ENV}: {err}")
         })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireRequest {
+    contents: Vec<GeminiImageWireContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiImageWireContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GeminiImageWireGenerationConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireContent {
+    parts: Vec<GeminiImageWirePart>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWirePart {
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Vec<String>>,
+    response_modalities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiImageWireCandidate>,
+    model_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireCandidate {
+    content: Option<GeminiImageWireResponseContent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireResponseContent {
+    parts: Option<Vec<GeminiImageWireResponsePart>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GeminiImageWireResponsePart {
+    Text {
+        text: String,
+    },
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: GeminiImageWireInlineData,
+    },
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiImageWireInlineData {
+    mime_type: String,
+    data: String,
+}
+
+#[derive(Debug)]
+enum ImageRequestFailure {
+    Retryable(Error),
+    Fatal(Error),
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || matches!(status.as_u16(), 408 | 409 | 425 | 429)
+}
+
+fn truncate_error_body(body: &str) -> String {
+    const MAX_LEN: usize = 800;
+
+    if body.len() <= MAX_LEN {
+        body.to_string()
+    } else {
+        format!("{}...(truncated)", &body[..MAX_LEN])
     }
 }
 
@@ -252,8 +458,8 @@ impl ChatProvider for GeminiClient {
         let stream = builder
             .execute_stream()
             .await
-            .map_err(|err| crate::error::Error::Provider(err.to_string()))?
-            .map_err(|err| crate::error::Error::Provider(err.to_string()))
+            .map_err(|err| Error::provider("gemini", err.to_string()))?
+            .map_err(|err| Error::provider("gemini", err.to_string()))
             .map(|chunk| {
                 chunk.map(|response| ChatChunk {
                     delta: response.text(),
