@@ -14,7 +14,7 @@ Rust SDK for the 伊莉思 API gateway with a unified async client and provider-
 
 ```toml
 [dependencies]
-yls-agi-rust-sdk = { path = "." }
+yls-agi-rust-sdk = "0.1.0"
 ```
 
 ## Quick Start
@@ -182,6 +182,7 @@ Use `ClientBuilder` or provider constructors to override auth mode if your gatew
 - Default environment variable: `YLS_AGI_KEY`
 - Unified client: `Client::from_env()?` or `Client::default()`
 - Provider clients: `OpenAiClient::from_env()?`, `GeminiClient::from_env()?`, `ClaudeClient::from_env()?`
+- Request options: `GenerationOptions::default()`
 
 `Default` will panic if `YLS_AGI_KEY` is missing. Prefer `from_env()` when you want a fallible constructor.
 
