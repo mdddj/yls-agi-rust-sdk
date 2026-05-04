@@ -14,7 +14,7 @@ Rust SDK for the 伊莉思 API gateway with a unified async client and provider-
 
 ```toml
 [dependencies]
-yls-agi-rust-sdk = "0.1.1"
+yls-agi-rust-sdk = "0.1.2"
 ```
 
 ## Quick Start
@@ -78,6 +78,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let response = client.chat(request).await?;
+    println!("{}", response.message.content);
+    Ok(())
+}
+```
+
+If your local proxy breaks Rust `reqwest` requests, build the unified client with proxy disabled:
+
+```rust
+use yls_agi_rust_sdk::{ChatMessage, ChatRequest, ClientBuilder, GeminiModel, Provider};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ClientBuilder::from_env()?
+        .without_proxy()
+        .build()?;
+
+    let request = ChatRequest::new(
+        GeminiModel::Gemini3ProPreview,
+        vec![ChatMessage::user("用一句话介绍伊莉思")],
+    );
+
+    let response = client.chat(Provider::Gemini, request).await?;
     println!("{}", response.message.content);
     Ok(())
 }
@@ -183,6 +205,7 @@ Use `ClientBuilder` or provider constructors to override auth mode if your gatew
 - Unified client: `Client::from_env()?` or `Client::default()`
 - Provider clients: `OpenAiClient::from_env()?`, `GeminiClient::from_env()?`, `ClaudeClient::from_env()?`
 - Request options: `GenerationOptions::default()`
+- Proxy control: `ClientBuilder::without_proxy()`, `ClientBuilder::with_system_proxy()`, `ClientBuilder::with_proxy("http://127.0.0.1:7890")`
 
 `Default` will panic if `YLS_AGI_KEY` is missing. Prefer `from_env()` when you want a fallible constructor.
 

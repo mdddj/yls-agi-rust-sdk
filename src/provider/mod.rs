@@ -12,6 +12,7 @@ use crate::{
     types::{ChatChunk, ChatRequest, ChatResponse},
 };
 use futures::stream::BoxStream;
+use reqwest::Proxy;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,38 @@ pub struct ProviderConfig {
     pub api_key: String,
     pub auth_mode: AuthMode,
     pub http_client: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HttpClientConfig {
+    pub proxy: Option<ProxyConfig>,
+}
+
+impl HttpClientConfig {
+    pub fn build_client(&self) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder();
+
+        if let Some(proxy) = &self.proxy {
+            match proxy {
+                ProxyConfig::UseSystem => {}
+                ProxyConfig::Disable => {
+                    builder = builder.no_proxy();
+                }
+                ProxyConfig::Custom(proxy_url) => {
+                    builder = builder.proxy(Proxy::all(proxy_url)?);
+                }
+            }
+        }
+
+        Ok(builder.build()?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyConfig {
+    UseSystem,
+    Disable,
+    Custom(String),
 }
 
 pub type ChatStream = BoxStream<'static, Result<ChatChunk>>;

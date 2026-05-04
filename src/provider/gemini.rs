@@ -1,17 +1,14 @@
 use crate::{
     error::{Error, Result},
     models::GeminiModel,
-    provider::{AuthMode, ChatProvider, ChatStream, ProviderConfig},
+    provider::{AuthMode, ChatProvider, ChatStream, HttpClientConfig, ProviderConfig, sse},
     types::{
         ChatChunk, ChatMessage, ChatRequest, ChatResponse, FinishReason, GeminiImageRequest,
-        GeminiImageResponse, GeneratedImage, Role, Usage,
+        GeminiImageResponse, GeneratedImage, GenerationOptions, Role, Usage,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use futures::{StreamExt, TryStreamExt};
-use gemini_rust::{
-    Gemini, GenerationConfig, GenerationResponse, Message as GeminiMessage, Model as GeminiApiModel,
-};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
@@ -45,71 +42,30 @@ impl GeminiClient {
         base_url: Url,
         auth_mode: AuthMode,
     ) -> Result<Self> {
+        Self::with_config(api_key, base_url, auth_mode, HttpClientConfig::default())
+    }
+
+    pub fn with_config(
+        api_key: impl Into<String>,
+        base_url: Url,
+        auth_mode: AuthMode,
+        http_config: HttpClientConfig,
+    ) -> Result<Self> {
         Ok(Self {
             config: ProviderConfig {
                 base_url,
                 api_key: api_key.into(),
                 auth_mode,
-                http_client: reqwest::Client::new(),
+                http_client: http_config.build_client()?,
             },
         })
     }
 
     pub async fn raw_generate_content(&self, request: ChatRequest) -> Result<Value> {
-        let response = self.execute(request).await?;
-        Ok(serde_json::to_value(response)?)
-    }
-
-    fn build_client(&self, model: &str) -> Result<Gemini> {
-        Gemini::with_model_and_base_url(
-            self.config.api_key.clone(),
-            GeminiApiModel::Custom(format!("models/{model}")),
-            self.config.base_url.clone(),
-        )
-        .map_err(|err| Error::provider("gemini", err.to_string()))
-    }
-
-    fn build_messages(messages: &[ChatMessage]) -> Vec<GeminiMessage> {
-        messages
-            .iter()
-            .filter(|message| message.role != Role::System)
-            .map(|message| match message.role {
-                Role::User => GeminiMessage::user(message.content.clone()),
-                Role::Assistant => GeminiMessage::model(message.content.clone()),
-                Role::System => GeminiMessage::user(message.content.clone()),
-            })
-            .collect()
-    }
-
-    async fn execute(&self, request: ChatRequest) -> Result<GenerationResponse> {
-        let client = self.build_client(&request.model)?;
-        let system = request
-            .messages
-            .iter()
-            .filter(|message| message.role == Role::System)
-            .map(|message| message.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut builder = client
-            .generate_content()
-            .with_messages(Self::build_messages(&request.messages))
-            .with_generation_config(GenerationConfig {
-                temperature: request.options.temperature,
-                top_p: request.options.top_p,
-                max_output_tokens: request.options.max_tokens.map(|value| value as i32),
-                stop_sequences: request.options.stop,
-                ..Default::default()
-            });
-
-        if !system.is_empty() {
-            builder = builder.with_system_prompt(system);
-        }
-
-        builder
-            .execute()
+        let body = Self::build_chat_request(&request);
+        self.send_json_request(&request.model, "generateContent", &body)
             .await
-            .map_err(|err| Error::provider("gemini", err.to_string()))
+            .map_err(HttpRequestFailure::into_error)
     }
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
@@ -129,7 +85,7 @@ impl GeminiClient {
         .contains(&model_name.as_str());
 
         if !supports_image {
-            return Err(crate::error::Error::UnsupportedConfig(format!(
+            return Err(Error::UnsupportedConfig(format!(
                 "model `{model_name}` does not support image generation"
             )));
         }
@@ -145,7 +101,7 @@ impl GeminiClient {
     async fn execute_image_with_retry(
         &self,
         model: &str,
-        body: &GeminiImageWireRequest,
+        body: &GeminiGenerateContentRequest,
     ) -> Result<Value> {
         let mut last_error = None;
 
@@ -154,10 +110,10 @@ impl GeminiClient {
                 sleep(Duration::from_millis(delay_ms)).await;
             }
 
-            match self.send_image_request(model, body).await {
+            match self.send_json_request(model, "generateContent", body).await {
                 Ok(response) => return Ok(response),
-                Err(ImageRequestFailure::Retryable(err)) => last_error = Some(err),
-                Err(ImageRequestFailure::Fatal(err)) => return Err(err),
+                Err(HttpRequestFailure::Retryable(err)) => last_error = Some(err),
+                Err(HttpRequestFailure::Fatal(err)) => return Err(err),
             }
         }
 
@@ -165,67 +121,124 @@ impl GeminiClient {
             .unwrap_or_else(|| Error::provider("gemini", "image generation failed after retries")))
     }
 
-    fn build_image_request(request: GeminiImageRequest) -> GeminiImageWireRequest {
-        let generation_config = GeminiImageWireGenerationConfig {
-            temperature: request.options.temperature,
-            top_p: request.options.top_p,
-            max_output_tokens: request.options.max_tokens,
-            stop_sequences: request.options.stop,
-            response_modalities: vec!["TEXT".to_string(), "IMAGE".to_string()],
-        };
+    fn build_chat_request(request: &ChatRequest) -> GeminiGenerateContentRequest {
+        GeminiGenerateContentRequest {
+            contents: Self::build_contents(&request.messages),
+            system_instruction: Self::build_system_instruction(&request.messages),
+            generation_config: Self::build_generation_config(&request.options, None),
+        }
+    }
 
-        GeminiImageWireRequest {
-            contents: vec![GeminiImageWireContent {
-                parts: vec![GeminiImageWirePart {
+    fn build_image_request(request: GeminiImageRequest) -> GeminiGenerateContentRequest {
+        GeminiGenerateContentRequest {
+            contents: vec![GeminiRequestContent {
+                role: None,
+                parts: vec![GeminiRequestPart {
                     text: request.prompt,
                 }],
             }],
             system_instruction: request
                 .system_prompt
-                .map(|system_prompt| GeminiImageWireContent {
-                    parts: vec![GeminiImageWirePart {
-                        text: system_prompt,
-                    }],
-                }),
-            generation_config: Some(generation_config),
+                .map(Self::system_instruction_from_text),
+            generation_config: Self::build_generation_config(
+                &request.options,
+                Some(vec!["TEXT".to_string(), "IMAGE".to_string()]),
+            ),
         }
     }
 
-    async fn send_image_request(
+    fn build_contents(messages: &[ChatMessage]) -> Vec<GeminiRequestContent> {
+        messages
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .map(|message| GeminiRequestContent {
+                role: Some(
+                    match message.role {
+                        Role::User => "user",
+                        Role::Assistant => "model",
+                        Role::System => "user",
+                    }
+                    .to_string(),
+                ),
+                parts: vec![GeminiRequestPart {
+                    text: message.content.clone(),
+                }],
+            })
+            .collect()
+    }
+
+    fn build_system_instruction(messages: &[ChatMessage]) -> Option<GeminiRequestContent> {
+        let system = messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        (!system.is_empty()).then(|| Self::system_instruction_from_text(system))
+    }
+
+    fn system_instruction_from_text(text: impl Into<String>) -> GeminiRequestContent {
+        GeminiRequestContent {
+            role: None,
+            parts: vec![GeminiRequestPart { text: text.into() }],
+        }
+    }
+
+    fn build_generation_config(
+        options: &GenerationOptions,
+        response_modalities: Option<Vec<String>>,
+    ) -> Option<GeminiRequestGenerationConfig> {
+        let config = GeminiRequestGenerationConfig {
+            temperature: options.temperature,
+            top_p: options.top_p,
+            max_output_tokens: options.max_tokens,
+            stop_sequences: options.stop.clone(),
+            response_modalities,
+        };
+
+        if config.temperature.is_none()
+            && config.top_p.is_none()
+            && config.max_output_tokens.is_none()
+            && config.stop_sequences.is_none()
+            && config.response_modalities.is_none()
+        {
+            None
+        } else {
+            Some(config)
+        }
+    }
+
+    async fn send_json_request<T: Serialize>(
         &self,
         model: &str,
-        body: &GeminiImageWireRequest,
-    ) -> std::result::Result<Value, ImageRequestFailure> {
+        action: &str,
+        body: &T,
+    ) -> std::result::Result<Value, HttpRequestFailure> {
         let url = self
-            .config
-            .base_url
-            .join(&format!("models/{model}:generateContent"))
-            .map_err(|err| {
-                ImageRequestFailure::Fatal(Error::provider("gemini", err.to_string()))
-            })?;
-
+            .build_action_url(model, action)
+            .map_err(HttpRequestFailure::Fatal)?;
         let request = self.config.auth_mode.apply(
             self.config.http_client.post(url).json(body),
             &self.config.api_key,
         );
 
         let response = request.send().await.map_err(|err| {
-            ImageRequestFailure::Retryable(Error::provider(
+            HttpRequestFailure::Retryable(Error::provider(
                 "gemini",
-                format!("image request transport error: {err}"),
+                format!("request transport error: {err}"),
             ))
         })?;
         let status = response.status();
         let response_body = response.text().await.map_err(|err| {
             let error = Error::provider(
                 "gemini",
-                format!("failed to read image response body (status {status}): {err}"),
+                format!("failed to read response body (status {status}): {err}"),
             );
-
             if is_retryable_status(status) {
-                ImageRequestFailure::Retryable(error)
+                HttpRequestFailure::Retryable(error)
             } else {
-                ImageRequestFailure::Fatal(error)
+                HttpRequestFailure::Fatal(error)
             }
         })?;
 
@@ -233,61 +246,112 @@ impl GeminiClient {
             let error = Error::provider(
                 "gemini",
                 format!(
-                    "image request failed with status {status}: {}",
+                    "request failed with status {status}: {}",
                     truncate_error_body(&response_body)
                 ),
             );
-
             return Err(if is_retryable_status(status) {
-                ImageRequestFailure::Retryable(error)
+                HttpRequestFailure::Retryable(error)
             } else {
-                ImageRequestFailure::Fatal(error)
+                HttpRequestFailure::Fatal(error)
             });
         }
 
         serde_json::from_str(&response_body).map_err(|err| {
-            ImageRequestFailure::Fatal(Error::provider(
+            HttpRequestFailure::Fatal(Error::provider(
                 "gemini",
                 format!(
-                    "failed to decode image generation response: {err}; body: {}",
+                    "failed to decode response: {err}; body: {}",
                     truncate_error_body(&response_body)
                 ),
             ))
         })
     }
 
-    fn normalize(response: GenerationResponse) -> ChatResponse {
-        let usage = response.usage_metadata.as_ref().map(|usage| Usage {
-            input_tokens: usage.prompt_token_count.map(|value| value as u32),
-            output_tokens: usage.candidates_token_count.map(|value| value as u32),
-            total_tokens: usage.total_token_count.map(|value| value as u32),
-        });
-        let model = response.model_version.clone();
-        let text = response.text();
-        let raw = serde_json::to_value(&response).ok();
+    async fn send_stream_request<T: Serialize>(
+        &self,
+        model: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        let mut url = self.build_action_url(model, "streamGenerateContent")?;
+        url.query_pairs_mut().append_pair("alt", "sse");
 
-        ChatResponse {
-            model,
-            message: ChatMessage::assistant(text),
-            finish_reason: response
-                .candidates
-                .first()
-                .and_then(|candidate| candidate.finish_reason.as_ref())
-                .map(|reason| FinishReason::Other(format!("{reason:?}"))),
-            usage,
-            raw,
+        let request = self.config.auth_mode.apply(
+            self.config.http_client.post(url).json(body),
+            &self.config.api_key,
+        );
+
+        let response = request
+            .send()
+            .await
+            .map_err(|err| Error::provider("gemini", format!("stream transport error: {err}")))?;
+        let status = response.status();
+
+        if status.is_success() {
+            return Ok(response);
         }
+
+        let response_body = response.text().await.map_err(|err| {
+            Error::provider(
+                "gemini",
+                format!("failed to read stream error body (status {status}): {err}"),
+            )
+        })?;
+
+        Err(Error::provider(
+            "gemini",
+            format!(
+                "stream request failed with status {status}: {}",
+                truncate_error_body(&response_body)
+            ),
+        ))
+    }
+
+    fn build_action_url(&self, model: &str, action: &str) -> Result<Url> {
+        self.config
+            .base_url
+            .join(&format!("models/{model}:{action}"))
+            .map_err(Error::from)
+    }
+
+    fn normalize_chat_response(raw: Value) -> Result<ChatResponse> {
+        let response: GeminiGenerateContentResponse =
+            serde_json::from_value(raw.clone()).map_err(|err| {
+                Error::provider(
+                    "gemini",
+                    format!("failed to normalize chat response: {err}"),
+                )
+            })?;
+
+        let first_candidate = response.candidates.first();
+        let content = first_candidate
+            .and_then(|candidate| candidate.content.as_ref())
+            .map(extract_text)
+            .unwrap_or_default();
+
+        Ok(ChatResponse {
+            model: response.model_version,
+            message: ChatMessage::assistant(content),
+            finish_reason: first_candidate
+                .and_then(|candidate| candidate.finish_reason.as_deref())
+                .map(map_finish_reason),
+            usage: response.usage_metadata.map(|usage| Usage {
+                input_tokens: usage.prompt_token_count,
+                output_tokens: usage.candidates_token_count,
+                total_tokens: usage.total_token_count,
+            }),
+            raw: Some(raw),
+        })
     }
 
     fn normalize_image_response(raw: Value) -> Result<GeminiImageResponse> {
-        let response: GeminiImageWireResponse =
+        let response: GeminiGenerateContentResponse =
             serde_json::from_value(raw.clone()).map_err(|err| {
                 Error::provider(
                     "gemini",
                     format!("failed to normalize image generation response: {err}"),
                 )
             })?;
-        let model = response.model_version;
         let mut text = Vec::new();
         let mut images = Vec::new();
 
@@ -297,22 +361,22 @@ impl GeminiClient {
             {
                 for part in parts {
                     match part {
-                        GeminiImageWireResponsePart::Text { text: value } => text.push(value),
-                        GeminiImageWireResponsePart::InlineData { inline_data } => {
+                        GeminiResponsePart::Text { text: value } => text.push(value),
+                        GeminiResponsePart::InlineData { inline_data } => {
                             images.push(GeneratedImage {
                                 mime_type: inline_data.mime_type.clone(),
                                 data_base64: inline_data.data.clone(),
                                 bytes: BASE64.decode(&inline_data.data)?,
                             })
                         }
-                        GeminiImageWireResponsePart::Other => {}
+                        GeminiResponsePart::Other(_) => {}
                     }
                 }
             }
         }
 
         Ok(GeminiImageResponse {
-            model,
+            model: response.model_version,
             text,
             images,
             raw: Some(raw),
@@ -328,31 +392,108 @@ impl Default for GeminiClient {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiImageWireRequest {
-    contents: Vec<GeminiImageWireContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<GeminiImageWireContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GeminiImageWireGenerationConfig>,
+#[async_trait::async_trait]
+impl ChatProvider for GeminiClient {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        let body = Self::build_chat_request(&request);
+        let raw = self
+            .send_json_request(&request.model, "generateContent", &body)
+            .await
+            .map_err(HttpRequestFailure::into_error)?;
+        Self::normalize_chat_response(raw)
+    }
+
+    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
+        let body = Self::build_chat_request(&request);
+        let response = self.send_stream_request(&request.model, &body).await?;
+
+        Ok(Box::pin(
+            sse::parse_sse_stream(response, gemini_chunk_mapper).boxed(),
+        ))
+    }
+}
+
+fn gemini_chunk_mapper(data: String) -> Result<Option<ChatChunk>> {
+    let raw: Value = serde_json::from_str(&data)?;
+    let response: GeminiGenerateContentResponse = serde_json::from_value(raw.clone())
+        .map_err(|err| Error::provider("gemini", format!("failed to parse stream chunk: {err}")))?;
+    let candidate = match response.candidates.first() {
+        Some(candidate) => candidate,
+        None => return Ok(None),
+    };
+    let delta = candidate
+        .content
+        .as_ref()
+        .map(extract_text)
+        .unwrap_or_default();
+    let finish_reason = candidate.finish_reason.as_deref().map(map_finish_reason);
+
+    if delta.is_empty() && finish_reason.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(ChatChunk {
+        done: finish_reason.is_some(),
+        delta,
+        finish_reason,
+        raw: Some(raw),
+    }))
+}
+
+fn extract_text(content: &GeminiResponseContent) -> String {
+    content
+        .parts
+        .as_ref()
+        .into_iter()
+        .flat_map(|parts| parts.iter())
+        .filter_map(|part| match part {
+            GeminiResponsePart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn map_finish_reason(value: &str) -> FinishReason {
+    match value {
+        "STOP" => FinishReason::Stop,
+        "MAX_TOKENS" => FinishReason::Length,
+        "SAFETY" | "RECITATION" | "LANGUAGE" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
+        | "IMAGE_SAFETY" => FinishReason::ContentFilter,
+        "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => {
+            FinishReason::ToolCall
+        }
+        other => FinishReason::Other(other.to_string()),
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireContent {
-    parts: Vec<GeminiImageWirePart>,
+struct GeminiGenerateContentRequest {
+    contents: Vec<GeminiRequestContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiRequestContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_config: Option<GeminiRequestGenerationConfig>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWirePart {
+struct GeminiRequestContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    parts: Vec<GeminiRequestPart>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiRequestPart {
     text: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireGenerationConfig {
+struct GeminiRequestGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -361,53 +502,73 @@ struct GeminiImageWireGenerationConfig {
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Vec<String>>,
-    response_modalities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_modalities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireResponse {
+struct GeminiGenerateContentResponse {
     #[serde(default)]
-    candidates: Vec<GeminiImageWireCandidate>,
+    candidates: Vec<GeminiCandidate>,
+    usage_metadata: Option<GeminiUsageMetadata>,
     model_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireCandidate {
-    content: Option<GeminiImageWireResponseContent>,
+struct GeminiCandidate {
+    content: Option<GeminiResponseContent>,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireResponseContent {
-    parts: Option<Vec<GeminiImageWireResponsePart>>,
+struct GeminiResponseContent {
+    parts: Option<Vec<GeminiResponsePart>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum GeminiImageWireResponsePart {
+enum GeminiResponsePart {
     Text {
         text: String,
     },
     InlineData {
         #[serde(rename = "inlineData")]
-        inline_data: GeminiImageWireInlineData,
+        inline_data: GeminiInlineData,
     },
-    Other,
+    Other(Value),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiImageWireInlineData {
+struct GeminiInlineData {
     mime_type: String,
     data: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsageMetadata {
+    prompt_token_count: Option<u32>,
+    candidates_token_count: Option<u32>,
+    total_token_count: Option<u32>,
+}
+
 #[derive(Debug)]
-enum ImageRequestFailure {
+enum HttpRequestFailure {
     Retryable(Error),
     Fatal(Error),
+}
+
+impl HttpRequestFailure {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Retryable(error) | Self::Fatal(error) => error,
+        }
+    }
 }
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -421,54 +582,5 @@ fn truncate_error_body(body: &str) -> String {
         body.to_string()
     } else {
         format!("{}...(truncated)", &body[..MAX_LEN])
-    }
-}
-
-#[async_trait::async_trait]
-impl ChatProvider for GeminiClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        Ok(Self::normalize(self.execute(request).await?))
-    }
-
-    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
-        let client = self.build_client(&request.model)?;
-        let system = request
-            .messages
-            .iter()
-            .filter(|message| message.role == Role::System)
-            .map(|message| message.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut builder = client
-            .generate_content()
-            .with_messages(Self::build_messages(&request.messages))
-            .with_generation_config(GenerationConfig {
-                temperature: request.options.temperature,
-                top_p: request.options.top_p,
-                max_output_tokens: request.options.max_tokens.map(|value| value as i32),
-                stop_sequences: request.options.stop,
-                ..Default::default()
-            });
-
-        if !system.is_empty() {
-            builder = builder.with_system_prompt(system);
-        }
-
-        let stream = builder
-            .execute_stream()
-            .await
-            .map_err(|err| Error::provider("gemini", err.to_string()))?
-            .map_err(|err| Error::provider("gemini", err.to_string()))
-            .map(|chunk| {
-                chunk.map(|response| ChatChunk {
-                    delta: response.text(),
-                    done: false,
-                    finish_reason: None,
-                    raw: serde_json::to_value(response).ok(),
-                })
-            });
-
-        Ok(Box::pin(stream))
     }
 }

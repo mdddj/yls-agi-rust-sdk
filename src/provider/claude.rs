@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    provider::{AuthMode, ChatProvider, ChatStream, ProviderConfig, sse},
+    provider::{AuthMode, ChatProvider, ChatStream, HttpClientConfig, ProviderConfig, sse},
     types::{ChatMessage, ChatRequest, ChatResponse, FinishReason, Role},
 };
 use futures::StreamExt;
@@ -35,12 +35,21 @@ impl ClaudeClient {
         base_url: Url,
         auth_mode: AuthMode,
     ) -> Result<Self> {
+        Self::with_config(api_key, base_url, auth_mode, HttpClientConfig::default())
+    }
+
+    pub fn with_config(
+        api_key: impl Into<String>,
+        base_url: Url,
+        auth_mode: AuthMode,
+        http_config: HttpClientConfig,
+    ) -> Result<Self> {
         Ok(Self {
             config: ProviderConfig {
                 base_url,
                 api_key: api_key.into(),
                 auth_mode,
-                http_client: reqwest::Client::new(),
+                http_client: http_config.build_client()?,
             },
         })
     }

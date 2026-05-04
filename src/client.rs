@@ -1,6 +1,9 @@
 use crate::{
     error::{Error, Result},
-    provider::{AuthMode, ChatStream, ClaudeClient, GeminiClient, OpenAiClient, Provider},
+    provider::{
+        AuthMode, ChatStream, ClaudeClient, GeminiClient, HttpClientConfig, OpenAiClient, Provider,
+        ProxyConfig,
+    },
     types::{ChatRequest, ChatResponse},
 };
 use std::sync::Arc;
@@ -72,6 +75,7 @@ pub struct ClientBuilder {
     openai_base_url: Option<String>,
     gemini_base_url: Option<String>,
     claude_base_url: Option<String>,
+    http_client_config: HttpClientConfig,
 }
 
 impl ClientBuilder {
@@ -84,6 +88,7 @@ impl ClientBuilder {
             openai_base_url: None,
             gemini_base_url: None,
             claude_base_url: None,
+            http_client_config: HttpClientConfig::default(),
         }
     }
 
@@ -123,8 +128,23 @@ impl ClientBuilder {
         self
     }
 
+    pub fn with_proxy(mut self, proxy_url: impl Into<String>) -> Self {
+        self.http_client_config.proxy = Some(ProxyConfig::Custom(proxy_url.into()));
+        self
+    }
+
+    pub fn without_proxy(mut self) -> Self {
+        self.http_client_config.proxy = Some(ProxyConfig::Disable);
+        self
+    }
+
+    pub fn with_system_proxy(mut self) -> Self {
+        self.http_client_config.proxy = Some(ProxyConfig::UseSystem);
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
-        let openai = OpenAiClient::with_base_url_and_auth(
+        let openai = OpenAiClient::with_config(
             self.api_key.clone(),
             url::Url::parse(
                 self.openai_base_url
@@ -132,8 +152,9 @@ impl ClientBuilder {
                     .unwrap_or("https://api.ylsagi.com/openai/v1/"),
             )?,
             self.openai_auth_mode,
+            self.http_client_config.clone(),
         )?;
-        let gemini = GeminiClient::with_base_url_and_auth(
+        let gemini = GeminiClient::with_config(
             self.api_key.clone(),
             url::Url::parse(
                 self.gemini_base_url
@@ -141,8 +162,9 @@ impl ClientBuilder {
                     .unwrap_or("https://api.ylsagi.com/gemini/v1beta/"),
             )?,
             self.gemini_auth_mode,
+            self.http_client_config.clone(),
         )?;
-        let claude = ClaudeClient::with_base_url_and_auth(
+        let claude = ClaudeClient::with_config(
             self.api_key,
             url::Url::parse(
                 self.claude_base_url
@@ -150,6 +172,7 @@ impl ClientBuilder {
                     .unwrap_or("https://api.ylsagi.com/claude/v1/"),
             )?,
             self.claude_auth_mode,
+            self.http_client_config,
         )?;
 
         Ok(Client {
