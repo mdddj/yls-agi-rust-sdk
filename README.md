@@ -14,7 +14,7 @@ Rust SDK for the 伊莉思 API gateway with a unified async client and provider-
 
 ```toml
 [dependencies]
-yls-agi-rust-sdk = "0.1.0"
+yls-agi-rust-sdk = "0.1.1"
 ```
 
 ## Quick Start
