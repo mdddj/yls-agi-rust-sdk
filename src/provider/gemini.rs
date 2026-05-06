@@ -4,7 +4,7 @@ use crate::{
     provider::{AuthMode, ChatProvider, ChatStream, HttpClientConfig, ProviderConfig, sse},
     types::{
         ChatChunk, ChatMessage, ChatRequest, ChatResponse, FinishReason, GeminiImageRequest,
-        GeminiImageResponse, GeneratedImage, GenerationOptions, Role, Usage,
+        GeminiImageResponse, GeneratedImage, GenerationOptions, MessagePart, Role, Usage,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -130,13 +130,21 @@ impl GeminiClient {
     }
 
     fn build_image_request(request: GeminiImageRequest) -> GeminiGenerateContentRequest {
+        let mut parts = Vec::with_capacity(1 + request.reference_images.len());
+        parts.push(GeminiRequestPart::Text {
+            text: request.prompt,
+        });
+        parts.extend(request.reference_images.into_iter().map(|image| {
+            GeminiRequestPart::InlineData {
+                inline_data: GeminiInlineData {
+                    mime_type: image.mime_type,
+                    data: image.data_base64,
+                },
+            }
+        }));
+
         GeminiGenerateContentRequest {
-            contents: vec![GeminiRequestContent {
-                role: None,
-                parts: vec![GeminiRequestPart {
-                    text: request.prompt,
-                }],
-            }],
+            contents: vec![GeminiRequestContent { role: None, parts }],
             system_instruction: request
                 .system_prompt
                 .map(Self::system_instruction_from_text),
@@ -160,9 +168,7 @@ impl GeminiClient {
                     }
                     .to_string(),
                 ),
-                parts: vec![GeminiRequestPart {
-                    text: message.content.clone(),
-                }],
+                parts: message.content.iter().map(map_request_part).collect(),
             })
             .collect()
     }
@@ -171,7 +177,7 @@ impl GeminiClient {
         let system = messages
             .iter()
             .filter(|message| message.role == Role::System)
-            .map(|message| message.content.clone())
+            .map(ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -181,7 +187,7 @@ impl GeminiClient {
     fn system_instruction_from_text(text: impl Into<String>) -> GeminiRequestContent {
         GeminiRequestContent {
             role: None,
-            parts: vec![GeminiRequestPart { text: text.into() }],
+            parts: vec![GeminiRequestPart::Text { text: text.into() }],
         }
     }
 
@@ -454,6 +460,27 @@ fn extract_text(content: &GeminiResponseContent) -> String {
         .join("")
 }
 
+fn map_request_part(part: &MessagePart) -> GeminiRequestPart {
+    match part {
+        MessagePart::Text { text } => GeminiRequestPart::Text { text: text.clone() },
+        MessagePart::ImageUrl { url } => GeminiRequestPart::FileData {
+            file_data: GeminiFileData {
+                mime_type: guess_mime_type_from_url(url),
+                file_uri: url.clone(),
+            },
+        },
+        MessagePart::ImageBase64 {
+            mime_type,
+            data_base64,
+        } => GeminiRequestPart::InlineData {
+            inline_data: GeminiInlineData {
+                mime_type: mime_type.clone(),
+                data: data_base64.clone(),
+            },
+        },
+    }
+}
+
 fn map_finish_reason(value: &str) -> FinishReason {
     match value {
         "STOP" => FinishReason::Stop,
@@ -486,9 +513,19 @@ struct GeminiRequestContent {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiRequestPart {
-    text: String,
+#[serde(untagged)]
+enum GeminiRequestPart {
+    Text {
+        text: String,
+    },
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: GeminiInlineData,
+    },
+    FileData {
+        #[serde(rename = "fileData")]
+        file_data: GeminiFileData,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -542,11 +579,18 @@ enum GeminiResponsePart {
     Other(Value),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiInlineData {
     mime_type: String,
     data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFileData {
+    mime_type: String,
+    file_uri: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,5 +626,19 @@ fn truncate_error_body(body: &str) -> String {
         body.to_string()
     } else {
         format!("{}...(truncated)", &body[..MAX_LEN])
+    }
+}
+
+fn guess_mime_type_from_url(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+
+    if lower.ends_with(".png") {
+        "image/png".to_string()
+    } else if lower.ends_with(".webp") {
+        "image/webp".to_string()
+    } else if lower.ends_with(".gif") {
+        "image/gif".to_string()
+    } else {
+        "image/jpeg".to_string()
     }
 }

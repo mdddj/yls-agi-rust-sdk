@@ -1,7 +1,7 @@
 use crate::{
     error::{Error, Result},
     provider::{AuthMode, ChatProvider, ChatStream, HttpClientConfig, ProviderConfig, sse},
-    types::{ChatMessage, ChatRequest, ChatResponse, FinishReason, Role},
+    types::{ChatMessage, ChatRequest, ChatResponse, FinishReason, MessagePart, Role},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ impl ClaudeClient {
             model: &'a str,
             stream: bool,
             max_tokens: u32,
-            messages: Vec<Message<'a>>,
+            messages: Vec<Message>,
             #[serde(skip_serializing_if = "Option::is_none")]
             system: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,16 +85,44 @@ impl ClaudeClient {
         }
 
         #[derive(Debug, Serialize)]
-        struct Message<'a> {
-            role: &'a str,
-            content: &'a str,
+        struct Message {
+            role: &'static str,
+            content: Vec<ContentBlock>,
+        }
+
+        #[derive(Debug, Serialize)]
+        #[serde(tag = "type")]
+        enum ContentBlock {
+            #[serde(rename = "text")]
+            Text { text: String },
+            #[serde(rename = "image")]
+            Image { source: ImageSource },
+        }
+
+        #[derive(Debug, Serialize)]
+        struct ImageSource {
+            #[serde(rename = "type")]
+            source_type: &'static str,
+            media_type: String,
+            data: String,
+        }
+
+        if request
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .any(|part| matches!(part, MessagePart::ImageUrl { .. }))
+        {
+            return Err(Error::UnsupportedConfig(
+                "claude image_url input is not supported; use base64 image data".to_string(),
+            ));
         }
 
         let system = request
             .messages
             .iter()
             .filter(|message| message.role == Role::System)
-            .map(|message| message.content.clone())
+            .map(ChatMessage::text_content)
             .collect::<Vec<_>>();
         let system = (!system.is_empty()).then(|| system.join("\n"));
 
@@ -112,7 +140,24 @@ impl ClaudeClient {
                         Role::Assistant => "assistant",
                         Role::System => "system",
                     },
-                    content: &message.content,
+                    content: message
+                        .content
+                        .iter()
+                        .map(|part| match part {
+                            MessagePart::Text { text } => ContentBlock::Text { text: text.clone() },
+                            MessagePart::ImageBase64 {
+                                mime_type,
+                                data_base64,
+                            } => ContentBlock::Image {
+                                source: ImageSource {
+                                    source_type: "base64",
+                                    media_type: mime_type.clone(),
+                                    data: data_base64.clone(),
+                                },
+                            },
+                            MessagePart::ImageUrl { .. } => unreachable!(),
+                        })
+                        .collect(),
                 })
                 .collect(),
             system,

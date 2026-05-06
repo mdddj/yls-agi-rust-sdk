@@ -20,6 +20,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let response = client.chat(Provider::Gemini, request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }

@@ -1,6 +1,6 @@
 [package]
 name = "yls-agi-rust-sdk"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Rust SDK for the YLS AGI gateway with unified OpenAI, Claude, and Gemini clients"
 license = "MIT"

@@ -12,5 +12,6 @@ pub use provider::{
 };
 pub use types::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, FinishReason, GeminiImageRequest,
-    GeminiImageResponse, GeneratedImage, GenerationOptions, Role, Usage,
+    GeminiImageResponse, GeminiReferenceImage, GeneratedImage, GenerationOptions, ImageMime,
+    ImageMimeType, MessagePart, Role, Usage,
 };

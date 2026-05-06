@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,31 +11,175 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageMimeType {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+    Bmp,
+    Tiff,
+}
+
+impl ImageMimeType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+            Self::Gif => "image/gif",
+            Self::Bmp => "image/bmp",
+            Self::Tiff => "image/tiff",
+        }
+    }
+}
+
+impl From<ImageMimeType> for String {
+    fn from(value: ImageMimeType) -> Self {
+        value.as_str().to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: String,
+    pub content: Vec<MessagePart>,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: content.into(),
-        }
+        Self::from_text(Role::System, content)
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: content.into(),
-        }
+        Self::from_text(Role::User, content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::from_text(Role::Assistant, content)
+    }
+
+    pub fn from_parts(role: Role, content: Vec<MessagePart>) -> Self {
+        Self { role, content }
+    }
+
+    pub fn from_text(role: Role, content: impl Into<String>) -> Self {
         Self {
-            role: Role::Assistant,
-            content: content.into(),
+            role,
+            content: vec![MessagePart::text(content)],
+        }
+    }
+
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.content.push(MessagePart::text(text));
+        self
+    }
+
+    pub fn with_image_url(mut self, url: impl Into<String>) -> Self {
+        self.content.push(MessagePart::image_url(url));
+        self
+    }
+
+    pub fn with_image_base64(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        data_base64: impl Into<String>,
+    ) -> Self {
+        self.content
+            .push(MessagePart::image_base64(mime_type, data_base64));
+        self
+    }
+
+    pub fn with_image_bytes(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        bytes: impl AsRef<[u8]>,
+    ) -> Self {
+        self.content
+            .push(MessagePart::image_bytes(mime_type, bytes));
+        self
+    }
+
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessagePart {
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        url: String,
+    },
+    ImageBase64 {
+        mime_type: String,
+        data_base64: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageMime {
+    Known(ImageMimeType),
+    Custom(String),
+}
+
+impl ImageMime {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Known(mime_type) => mime_type.as_str(),
+            Self::Custom(value) => value.as_str(),
+        }
+    }
+}
+
+impl From<ImageMimeType> for ImageMime {
+    fn from(value: ImageMimeType) -> Self {
+        Self::Known(value)
+    }
+}
+
+impl From<String> for ImageMime {
+    fn from(value: String) -> Self {
+        Self::Custom(value)
+    }
+}
+
+impl From<&str> for ImageMime {
+    fn from(value: &str) -> Self {
+        Self::Custom(value.to_string())
+    }
+}
+
+impl MessagePart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image_url(url: impl Into<String>) -> Self {
+        Self::ImageUrl { url: url.into() }
+    }
+
+    pub fn image_base64(mime_type: impl Into<ImageMime>, data_base64: impl Into<String>) -> Self {
+        Self::ImageBase64 {
+            mime_type: mime_type.into().as_str().to_string(),
+            data_base64: data_base64.into(),
+        }
+    }
+
+    pub fn image_bytes(mime_type: impl Into<ImageMime>, bytes: impl AsRef<[u8]>) -> Self {
+        Self::ImageBase64 {
+            mime_type: mime_type.into().as_str().to_string(),
+            data_base64: BASE64.encode(bytes.as_ref()),
         }
     }
 }
@@ -116,6 +261,7 @@ pub struct GeminiImageRequest {
     pub model: String,
     pub prompt: String,
     pub system_prompt: Option<String>,
+    pub reference_images: Vec<GeminiReferenceImage>,
     pub options: GenerationOptions,
 }
 
@@ -125,6 +271,7 @@ impl GeminiImageRequest {
             model: model.into(),
             prompt: prompt.into(),
             system_prompt: None,
+            reference_images: Vec::new(),
             options: GenerationOptions::default(),
         }
     }
@@ -134,9 +281,56 @@ impl GeminiImageRequest {
         self
     }
 
+    pub fn with_reference_image(mut self, image: GeminiReferenceImage) -> Self {
+        self.reference_images.push(image);
+        self
+    }
+
+    pub fn with_reference_image_base64(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        data_base64: impl Into<String>,
+    ) -> Self {
+        self.reference_images
+            .push(GeminiReferenceImage::from_base64(mime_type, data_base64));
+        self
+    }
+
+    pub fn with_reference_image_bytes(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        bytes: impl AsRef<[u8]>,
+    ) -> Self {
+        self.reference_images
+            .push(GeminiReferenceImage::from_bytes(mime_type, bytes));
+        self
+    }
+
     pub fn with_options(mut self, options: GenerationOptions) -> Self {
         self.options = options;
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeminiReferenceImage {
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
+impl GeminiReferenceImage {
+    pub fn from_base64(mime_type: impl Into<ImageMime>, data_base64: impl Into<String>) -> Self {
+        Self {
+            mime_type: mime_type.into().as_str().to_string(),
+            data_base64: data_base64.into(),
+        }
+    }
+
+    pub fn from_bytes(mime_type: impl Into<ImageMime>, bytes: impl AsRef<[u8]>) -> Self {
+        Self {
+            mime_type: mime_type.into().as_str().to_string(),
+            data_base64: BASE64.encode(bytes.as_ref()),
+        }
     }
 }
 

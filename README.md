@@ -8,13 +8,15 @@ Rust SDK for the 伊莉思 API gateway with a unified async client and provider-
 - Provider-specific clients when raw access is needed
 - Async Tokio API
 - Streaming support for OpenAI, Gemini, and Claude
+- Multimodal image input for OpenAI, Gemini, and Claude chat
+- Gemini image generation, including reference-image image editing
 - Pluggable auth modes to handle gateway compatibility differences
 
 ## Install
 
 ```toml
 [dependencies]
-yls-agi-rust-sdk = "0.1.2"
+yls-agi-rust-sdk = "0.1.3"
 ```
 
 ## Quick Start
@@ -34,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let response = client.chat(Provider::OpenAi, request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }
 ```
@@ -56,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let response = client.chat(request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }
 ```
@@ -78,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let response = client.chat(request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }
 ```
@@ -100,9 +102,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let response = client.chat(Provider::Gemini, request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }
+```
+
+## Vision Example
+
+```rust
+use std::fs;
+use yls_agi_rust_sdk::{
+    ChatMessage, ChatRequest, ClientBuilder, GeminiModel, GenerationOptions, ImageMimeType,
+    Provider,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image_bytes = fs::read("gemini-image-1.png")?;
+    let client = ClientBuilder::from_env()?
+        .without_proxy()
+        .build()?;
+
+    let request = ChatRequest::new(
+        GeminiModel::Gemini3ProPreview,
+        vec![
+            ChatMessage::system("You are a concise vision assistant."),
+            ChatMessage::user("这是什么？请用中文简短描述。")
+                .with_image_bytes(ImageMimeType::Png, &image_bytes),
+        ],
+    )
+    .with_options(GenerationOptions {
+        temperature: Some(0.2),
+        max_tokens: Some(256),
+        ..Default::default()
+    });
+
+    let response = client.chat(Provider::Gemini, request).await?;
+    println!("{}", response.message.text_content());
+    Ok(())
+}
+```
+
+You can also pass base64 data directly:
+
+```rust
+use yls_agi_rust_sdk::{ChatMessage, ImageMimeType};
+
+let message = ChatMessage::user("描述这张图片")
+    .with_image_base64(ImageMimeType::Png, image_base64);
+```
+
+Supported common image MIME enums:
+
+- `ImageMimeType::Png`
+- `ImageMimeType::Jpeg`
+- `ImageMimeType::Webp`
+- `ImageMimeType::Gif`
+- `ImageMimeType::Bmp`
+- `ImageMimeType::Tiff`
+
+If you need a custom type, the old string form still works:
+
+```rust
+let message = ChatMessage::user("描述这张图片")
+    .with_image_bytes("image/heic", &image_bytes);
 ```
 
 ## Gemini Image Example
@@ -137,6 +200,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Gemini Image Edit Example
+
+Gemini image-generation models also accept reference images. The SDK serializes them as Gemini `inlineData`, which matches the official Gemini image editing flow.
+
+```rust
+use std::fs;
+use yls_agi_rust_sdk::{
+    GeminiClient, GeminiImageRequest, GeminiModel, GenerationOptions, ImageMimeType,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let image_bytes = fs::read("gemini-image-1.png")?;
+    let client = GeminiClient::from_env()?;
+
+    let response = client
+        .generate_image(
+            GeminiImageRequest::new(
+                GeminiModel::Gemini3ProImagePreview,
+                "把这张角色图重绘成像素风游戏角色立绘，保留主体造型特征，透明背景。",
+            )
+            .with_reference_image_bytes(ImageMimeType::Png, &image_bytes)
+            .with_options(GenerationOptions {
+                temperature: Some(0.8),
+                max_tokens: Some(8192),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    if let Some(image) = response.images.first() {
+        image.save("gemini-edited.png")?;
+    }
+
+    Ok(())
+}
+```
+
+You can attach more than one reference image if needed:
+
+```rust
+use yls_agi_rust_sdk::{GeminiImageRequest, GeminiModel, ImageMimeType};
+
+let request = GeminiImageRequest::new(
+    GeminiModel::Gemini3ProImagePreview,
+    "基于这些参考图生成统一风格的角色海报",
+)
+.with_reference_image_bytes(ImageMimeType::Png, &front_view_bytes)
+.with_reference_image_bytes(ImageMimeType::Png, &side_view_bytes);
+```
+
 ## Claude Example
 
 ```rust
@@ -161,7 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let response = client.chat(request).await?;
-    println!("{}", response.message.content);
+    println!("{}", response.message.text_content());
     Ok(())
 }
 ```
@@ -193,9 +307,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Auth Notes
 
-- OpenAI defaults to `Authorization: Bearer <KEY>` because `openai_api_rust` hardcodes bearer auth.
-- Gemini defaults to `x-goog-api-key: <KEY>` because `gemini-rust` hardcodes Google-style auth.
-- Claude defaults to raw `Authorization: <KEY>` which matches the 伊莉思 docs.
+- Unified `ClientBuilder` defaults:
+- OpenAI: `Authorization: Bearer <KEY>`
+- Gemini: `x-goog-api-key: <KEY>`
+- Claude: raw `Authorization: <KEY>`
+- Provider constructors follow the same defaults.
 
 Use `ClientBuilder` or provider constructors to override auth mode if your gateway deployment differs.
 
