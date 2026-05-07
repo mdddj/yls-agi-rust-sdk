@@ -1,12 +1,12 @@
 use futures::StreamExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_json, header, method, path},
 };
 use yls_agi_rust_sdk::{
-    AuthMode, ChatMessage, ChatRequest, ClaudeClient, Client, GeminiClient, GeminiImageRequest,
-    GeminiModel, ImageMimeType, OpenAiClient, Provider,
+    AuthMode, ChatGptImageClient, ChatGptImageRequest, ChatMessage, ChatRequest, ClaudeClient,
+    Client, GeminiClient, GeminiImageRequest, GeminiModel, ImageMimeType, OpenAiClient, Provider,
 };
 
 #[tokio::test]
@@ -437,4 +437,120 @@ async fn unified_client_routes_to_provider() {
         .unwrap();
 
     assert_eq!(response.message.text_content(), "routed");
+}
+
+#[tokio::test]
+async fn chatgpt_image_generation_request_shape_is_correct() {
+    let png_header_base64 = "iVBORw0KGgo=";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("authorization", "Bearer test-key"))
+        .and(body_json(json!({
+            "model": "gpt-5.4",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "draw a cat"},
+                    {"type": "input_image", "image_url": "https://example.com/cat.png"},
+                    {"type": "input_image", "file_id": "file-123"}
+                ]
+            }],
+            "stream": true,
+            "tools": [{
+                "type": "image_generation",
+                "model": "gpt-image-2",
+                "background": "transparent"
+            }]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            &format!(
+                "data: {{\"type\":\"response.output_item.done\",\"response\":{{\"model\":\"gpt-5.4\"}},\"item\":{{\"type\":\"image_generation_call\",\"result\":\"data:image/png;base64,{png_header_base64}\"}}}}\n\n\
+             data: [DONE]\n\n",
+            ),
+        ))
+        .mount(&server)
+        .await;
+
+    let client = ChatGptImageClient::with_base_url_and_auth(
+        "test-key",
+        format!("{}/codex/", server.uri()).parse().unwrap(),
+        AuthMode::AuthorizationBearer,
+    )
+    .unwrap();
+
+    let mut tool_overrides = serde_json::Map::new();
+    tool_overrides.insert(
+        "background".to_string(),
+        Value::String("transparent".to_string()),
+    );
+
+    let response = client
+        .generate_image(
+            ChatGptImageRequest::new("gpt-5.4", "draw a cat")
+                .with_reference_url("https://example.com/cat.png")
+                .with_reference_file_id("file-123")
+                .with_tool_overrides(tool_overrides),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(response.image.mime_type, "image/png");
+    assert_eq!(
+        response.image.bytes,
+        vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    );
+}
+
+#[tokio::test]
+async fn unified_client_routes_to_chatgpt_image_generation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"type\":\"response.output_item.done\",\"response\":{\"model\":\"gpt-5.4\"},\"item\":{\"type\":\"image_generation_call\",\"result\":\"data:image/png;base64,aGVsbG8=\"}}\n\n\
+             data: [DONE]\n\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = Client::builder("test-key")
+        .with_chatgpt_image_base_url(format!("{}/codex/", server.uri()))
+        .build()
+        .unwrap();
+
+    let response = client
+        .generate_chatgpt_image(ChatGptImageRequest::new("gpt-5.4", "draw a cat"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.image.bytes, b"hello".to_vec());
+}
+
+#[tokio::test]
+async fn unified_client_uses_chatgpt_image_api_key_override() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("authorization", "Bearer codex-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"type\":\"response.output_item.done\",\"response\":{\"model\":\"gpt-5.4\"},\"item\":{\"type\":\"image_generation_call\",\"result\":\"data:image/png;base64,aGVsbG8=\"}}\n\n\
+             data: [DONE]\n\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = Client::builder("agi-key")
+        .with_chatgpt_image_api_key("codex-key")
+        .with_chatgpt_image_base_url(format!("{}/codex/", server.uri()))
+        .build()
+        .unwrap();
+
+    let response = client
+        .generate_chatgpt_image(ChatGptImageRequest::new("gpt-5.4", "draw a cat"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.image.bytes, b"hello".to_vec());
 }

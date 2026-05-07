@@ -373,6 +373,7 @@ impl GeminiClient {
                                 mime_type: inline_data.mime_type.clone(),
                                 data_base64: inline_data.data.clone(),
                                 bytes: BASE64.decode(&inline_data.data)?,
+                                saved_info: None,
                             })
                         }
                         GeminiResponsePart::Other(_) => {}

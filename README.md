@@ -1,25 +1,27 @@
 # yls-agi-rust-sdk
 
-Rust SDK for the 伊莉思 API gateway with a unified async client and provider-specific clients.
+面向伊莉思 API 网关的 Rust SDK，提供统一异步 `Client` 和各 Provider 专用客户端。
 
-## Features
+## 功能特性
 
-- Unified `Client` for OpenAI, Gemini, and Claude chat requests
-- Provider-specific clients when raw access is needed
-- Async Tokio API
-- Streaming support for OpenAI, Gemini, and Claude
-- Multimodal image input for OpenAI, Gemini, and Claude chat
-- Gemini image generation, including reference-image image editing
-- Pluggable auth modes to handle gateway compatibility differences
+- 统一的 `Client`，可向 OpenAI、Gemini、Claude 发起聊天请求
+- 在需要更底层控制时，可直接使用各 Provider 专用客户端
+- 基于 Tokio 的异步 API
+- 支持 OpenAI、Gemini、Claude 的流式输出
+- 支持 OpenAI、Gemini、Claude 的多模态图像输入
+- 支持 Gemini 生图，以及基于参考图的图片编辑
+- 支持基于 Responses `image_generation` 工具的 ChatGPT 生图能力
+- 支持可切换的鉴权模式，以适配不同网关部署差异
+- `GeneratedImage` 同时提供 `save()` 与 `save_with_metadata()` 保存辅助方法
 
-## Install
+## 安装
 
 ```toml
 [dependencies]
 yls-agi-rust-sdk = "0.1.3"
 ```
 
-## Quick Start
+## 快速开始
 
 ```rust
 use yls_agi_rust_sdk::{ChatMessage, ChatRequest, Client, Provider};
@@ -31,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "gpt-4.1",
         vec![
             ChatMessage::system("You are a concise assistant."),
-            ChatMessage::user("Say hello in Chinese."),
+            ChatMessage::user("请用中文打个招呼。"),
         ],
     );
 
@@ -41,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## OpenAI Example
+## OpenAI 示例
 
 ```rust
 use yls_agi_rust_sdk::{ChatMessage, ChatRequest, OpenAiClient, OpenAiModel};
@@ -63,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Gemini Example
+## Gemini 示例
 
 ```rust
 use yls_agi_rust_sdk::{ChatMessage, ChatRequest, GeminiClient, GeminiModel};
@@ -75,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         GeminiModel::Gemini3FlashPreview,
         vec![
             ChatMessage::system("You are a concise assistant."),
-            ChatMessage::user("Explain ownership in one sentence."),
+            ChatMessage::user("用一句话解释 Rust 的所有权。"),
         ],
     );
 
@@ -85,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-If your local proxy breaks Rust `reqwest` requests, build the unified client with proxy disabled:
+如果你的本地代理会导致 Rust `reqwest` 请求异常，可以在构建统一客户端时禁用代理：
 
 ```rust
 use yls_agi_rust_sdk::{ChatMessage, ChatRequest, ClientBuilder, GeminiModel, Provider};
@@ -107,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Vision Example
+## 图像理解示例
 
 ```rust
 use std::fs;
@@ -143,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-You can also pass base64 data directly:
+也可以直接传 base64 数据：
 
 ```rust
 use yls_agi_rust_sdk::{ChatMessage, ImageMimeType};
@@ -152,7 +154,7 @@ let message = ChatMessage::user("描述这张图片")
     .with_image_base64(ImageMimeType::Png, image_base64);
 ```
 
-Supported common image MIME enums:
+常用图片 MIME 枚举包括：
 
 - `ImageMimeType::Png`
 - `ImageMimeType::Jpeg`
@@ -161,14 +163,14 @@ Supported common image MIME enums:
 - `ImageMimeType::Bmp`
 - `ImageMimeType::Tiff`
 
-If you need a custom type, the old string form still works:
+如果你需要自定义类型，仍然可以直接传字符串：
 
 ```rust
 let message = ChatMessage::user("描述这张图片")
     .with_image_bytes("image/heic", &image_bytes);
 ```
 
-## Gemini Image Example
+## Gemini 生图示例
 
 ```rust
 use yls_agi_rust_sdk::{
@@ -182,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .generate_image(
             GeminiImageRequest::new(
                 GeminiModel::Gemini25FlashImage,
-                "Create a photorealistic orange cat wearing sunglasses.",
+                "生成一只戴着墨镜的写实风橘猫。",
             )
             .with_options(GenerationOptions {
                 max_tokens: Some(8192),
@@ -200,9 +202,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Gemini Image Edit Example
+## Gemini 参考图编辑示例
 
-Gemini image-generation models also accept reference images. The SDK serializes them as Gemini `inlineData`, which matches the official Gemini image editing flow.
+Gemini 生图模型也支持参考图输入。SDK 会把它序列化为 Gemini 的 `inlineData`，与官方的图片编辑流程一致。
 
 ```rust
 use std::fs;
@@ -238,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-You can attach more than one reference image if needed:
+如果需要，也可以附加多张参考图：
 
 ```rust
 use yls_agi_rust_sdk::{GeminiImageRequest, GeminiModel, ImageMimeType};
@@ -251,7 +253,86 @@ let request = GeminiImageRequest::new(
 .with_reference_image_bytes(ImageMimeType::Png, &side_view_bytes);
 ```
 
-## Claude Example
+## ChatGPT 生图示例
+
+SDK 现在内置了 `ChatGptImageClient`，用于调用 Responses `image_generation` 工具背后的 ChatGPT 生图能力。
+
+库内调用示例：
+
+```rust
+use yls_agi_rust_sdk::{ChatGptImageClient, ChatGptImageRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ChatGptImageClient::from_env()?;
+    let mut response = client
+        .generate_image(
+            ChatGptImageRequest::new(
+                "gpt-5.4",
+                "一个打磨完整的 2D 塔防炮台，透明背景。",
+            ),
+        )
+        .await?;
+
+    let saved = response.image.save_with_metadata("output/turret.png")?;
+    println!("{}", saved.absolute_output_path);
+    Ok(())
+}
+```
+
+`ChatGptImageClient::from_env()` 默认读取 `YLS_CODEX_KEY`。
+
+如果你需要格式化耗时字符串，也可以直接复用 SDK 导出的工具函数：
+
+```rust
+use yls_agi_rust_sdk::format_duration_ms;
+
+println!("{}", format_duration_ms(8421)); // 8.42 s
+```
+
+也可以附加参考图 URL 或文件 ID：
+
+```rust
+use yls_agi_rust_sdk::{ChatGptImageRequest, ChatGptReferenceImage};
+
+let request = ChatGptImageRequest::new("gpt-5.4", "把这张草图转成精致的游戏图标")
+    .with_reference(ChatGptReferenceImage::url("https://example.com/sketch.png"))
+    .with_reference_file_id("file-123");
+```
+
+也可以写成中文提示词：
+
+```rust
+use yls_agi_rust_sdk::{ChatGptImageRequest, ChatGptReferenceImage};
+
+let request = ChatGptImageRequest::new("gpt-5.4", "把这张草图转成精致的游戏图标")
+    .with_reference(ChatGptReferenceImage::url("https://example.com/sketch.png"))
+    .with_reference_file_id("file-123");
+```
+
+自带的 CLI 比 SDK API 更严格：它固定使用外层模型 `gpt-5.4` 和图片模型 `gpt-image-2`。
+
+CLI 用法：
+
+```bash
+cargo run --bin generate-image-via-responses -- \
+  --prompt "一个打磨完整的 2D 塔防炮台，透明背景" \
+  --output output/turret \
+  --api-key "$YLS_CODEX_KEY"
+```
+
+CLI 支持重复传入 `--reference`、自定义 `--base-url`、以及 `--tool-json`。模型在脚本内部固定，不能通过命令行覆盖。
+
+当前 CLI 的返回 JSON 包含：
+
+- `outputPath`
+- `absoluteOutputPath`
+- `inferredExtension`
+- `byteLength`
+- `totalDurationMs`
+- `totalDurationFormatted`
+
+## Claude 示例
 
 ```rust
 use yls_agi_rust_sdk::{
@@ -280,7 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Streaming Example
+## 流式输出示例
 
 ```rust
 use futures::StreamExt;
@@ -291,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::from_env()?;
     let request = ChatRequest::new(
         "gpt-4.1",
-        vec![ChatMessage::user("Write a short greeting letter.")],
+        vec![ChatMessage::user("写一段简短的问候语。")],
     )
     .with_stream(true);
 
@@ -305,31 +386,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Auth Notes
+## 鉴权说明
 
-- Unified `ClientBuilder` defaults:
-- OpenAI: `Authorization: Bearer <KEY>`
-- Gemini: `x-goog-api-key: <KEY>`
-- Claude: raw `Authorization: <KEY>`
-- Provider constructors follow the same defaults.
+- 统一 `ClientBuilder` 默认鉴权方式：
+- OpenAI：`Authorization: Bearer <KEY>`
+- Gemini：`x-goog-api-key: <KEY>`
+- Claude：`Authorization: <KEY>`
+- 各 Provider 专用客户端也遵循相同默认行为。
 
-Use `ClientBuilder` or provider constructors to override auth mode if your gateway deployment differs.
+如果你的网关部署要求不同，可以通过 `ClientBuilder` 或各 Provider 构造器覆盖鉴权模式。
 
-## Default Env
+如果聊天模型与 ChatGPT 生图使用不同 key，可以在统一客户端上显式指定：
 
-- Default environment variable: `YLS_AGI_KEY`
-- Unified client: `Client::from_env()?` or `Client::default()`
-- Provider clients: `OpenAiClient::from_env()?`, `GeminiClient::from_env()?`, `ClaudeClient::from_env()?`
-- Request options: `GenerationOptions::default()`
-- Proxy control: `ClientBuilder::without_proxy()`, `ClientBuilder::with_system_proxy()`, `ClientBuilder::with_proxy("http://127.0.0.1:7890")`
+```rust
+use yls_agi_rust_sdk::Client;
 
-`Default` will panic if `YLS_AGI_KEY` is missing. Prefer `from_env()` when you want a fallible constructor.
+let client = Client::builder("your-yls-agi-key")
+    .with_chatgpt_image_api_key("your-yls-codex-key")
+    .build()?;
+```
 
-## Model Enums
+## 默认环境变量
+
+- 网关聊天能力环境变量：`YLS_AGI_KEY`
+- ChatGPT 生图环境变量：`YLS_CODEX_KEY`
+- 统一客户端：`Client::from_env()?` 或 `Client::default()`
+- `Client::from_env()` / `ClientBuilder::from_env()` 需要同时存在 `YLS_AGI_KEY` 和 `YLS_CODEX_KEY`
+- Provider 客户端：`OpenAiClient::from_env()?`、`GeminiClient::from_env()?`、`ClaudeClient::from_env()?`
+- ChatGPT 生图客户端：`ChatGptImageClient::from_env()?`
+- 默认请求选项：`GenerationOptions::default()`
+- 代理控制：`ClientBuilder::without_proxy()`、`ClientBuilder::with_system_proxy()`、`ClientBuilder::with_proxy("http://127.0.0.1:7890")`
+
+`Client::default()` 在缺少 `YLS_AGI_KEY` 或 `YLS_CODEX_KEY` 时会 panic。需要可失败构造时，优先使用 `from_env()`。
+
+## 模型枚举
 
 ### OpenAI
 
-| Enum | Model String | 文档备注 |
+| 枚举 | 模型字符串 | 备注 |
 | --- | --- | --- |
 | `OpenAiModel::Gpt41` | `gpt-4.1` | 旗舰模型 |
 | `OpenAiModel::Gpt5Mini` | `gpt-5-mini` | 快速 GPT-5 |
@@ -343,7 +437,7 @@ Use `ClientBuilder` or provider constructors to override auth mode if your gatew
 
 ### Claude
 
-| Enum | Model String | 文档备注 |
+| 枚举 | 模型字符串 | 备注 |
 | --- | --- | --- |
 | `ClaudeModel::ClaudeHaiku4520251001` | `claude-haiku-4-5-20251001` | 快速经济模型 |
 | `ClaudeModel::ClaudeSonnet4520250929` | `claude-sonnet-4-5-20250929` | 旗舰模型 |
@@ -353,7 +447,7 @@ Use `ClientBuilder` or provider constructors to override auth mode if your gatew
 
 ### Gemini
 
-| Enum | Model String | 文档备注 |
+| 枚举 | 模型字符串 | 备注 |
 | --- | --- | --- |
 | `GeminiModel::Gemini3ProPreview` | `gemini-3-pro-preview` | 高级模型 |
 | `GeminiModel::Gemini3FlashPreview` | `gemini-3-flash-preview` | Gemini3 快速 |

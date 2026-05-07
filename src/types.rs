@@ -339,11 +339,63 @@ pub struct GeneratedImage {
     pub mime_type: String,
     pub data_base64: String,
     pub bytes: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_info: Option<SavedImageInfo>,
 }
 
 impl GeneratedImage {
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         std::fs::write(path, &self.bytes)
+    }
+
+    pub fn save_with_metadata(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> std::io::Result<SavedImageInfo> {
+        let path = path.as_ref();
+        std::fs::write(path, &self.bytes)?;
+        let absolute_output_path =
+            std::fs::canonicalize(path).unwrap_or_else(|_| absolute_path_fallback(path));
+        let saved_info = SavedImageInfo {
+            output_path: path.display().to_string(),
+            absolute_output_path: absolute_output_path.display().to_string(),
+            byte_length: self.bytes.len(),
+        };
+        self.saved_info = Some(saved_info.clone());
+        Ok(saved_info)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedImageInfo {
+    pub output_path: String,
+    pub absolute_output_path: String,
+    pub byte_length: usize,
+}
+
+pub fn format_duration_ms(total_duration_ms: u128) -> String {
+    if total_duration_ms < 1_000 {
+        return format!("{total_duration_ms} ms");
+    }
+
+    if total_duration_ms < 60_000 {
+        let secs = total_duration_ms as f64 / 1_000.0;
+        return format!("{secs:.2} s");
+    }
+
+    let total_seconds = total_duration_ms as f64 / 1_000.0;
+    let minutes = (total_seconds / 60.0).floor() as u64;
+    let seconds = total_seconds - (minutes as f64 * 60.0);
+    format!("{minutes} min {seconds:.2} s")
+}
+
+fn absolute_path_fallback(path: &Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
@@ -354,3 +406,117 @@ pub struct GeminiImageResponse {
     pub images: Vec<GeneratedImage>,
     pub raw: Option<serde_json::Value>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatGptImageRequest {
+    pub model: String,
+    pub prompt: String,
+    pub image_model: String,
+    pub references: Vec<ChatGptReferenceImage>,
+    pub tool_overrides: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl ChatGptImageRequest {
+    pub fn new(model: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            prompt: prompt.into(),
+            image_model: "gpt-image-2".to_string(),
+            references: Vec::new(),
+            tool_overrides: None,
+        }
+    }
+
+    pub fn with_image_model(mut self, image_model: impl Into<String>) -> Self {
+        self.image_model = image_model.into();
+        self
+    }
+
+    pub fn with_reference(mut self, reference: ChatGptReferenceImage) -> Self {
+        self.references.push(reference);
+        self
+    }
+
+    pub fn with_reference_url(mut self, url: impl Into<String>) -> Self {
+        self.references.push(ChatGptReferenceImage::url(url));
+        self
+    }
+
+    pub fn with_reference_file_id(mut self, file_id: impl Into<String>) -> Self {
+        self.references
+            .push(ChatGptReferenceImage::file_id(file_id));
+        self
+    }
+
+    pub fn with_reference_base64(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        data_base64: impl Into<String>,
+    ) -> Self {
+        self.references
+            .push(ChatGptReferenceImage::from_base64(mime_type, data_base64));
+        self
+    }
+
+    pub fn with_reference_bytes(
+        mut self,
+        mime_type: impl Into<ImageMime>,
+        bytes: impl AsRef<[u8]>,
+    ) -> Self {
+        self.references
+            .push(ChatGptReferenceImage::from_bytes(mime_type, bytes));
+        self
+    }
+
+    pub fn with_tool_overrides(
+        mut self,
+        tool_overrides: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.tool_overrides = Some(tool_overrides);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatGptReferenceImage {
+    Url(String),
+    FileId(String),
+}
+
+impl ChatGptReferenceImage {
+    pub fn url(url: impl Into<String>) -> Self {
+        Self::Url(url.into())
+    }
+
+    pub fn file_id(file_id: impl Into<String>) -> Self {
+        Self::FileId(file_id.into())
+    }
+
+    pub fn from_base64(mime_type: impl Into<ImageMime>, data_base64: impl Into<String>) -> Self {
+        Self::Url(format!(
+            "data:{};base64,{}",
+            mime_type.into().as_str(),
+            data_base64.into()
+        ))
+    }
+
+    pub fn from_bytes(mime_type: impl Into<ImageMime>, bytes: impl AsRef<[u8]>) -> Self {
+        Self::from_base64(mime_type, BASE64.encode(bytes.as_ref()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatGptImageResponse {
+    pub model: Option<String>,
+    pub image: GeneratedImage,
+    pub raw: Option<serde_json::Value>,
+}
+
+#[deprecated(note = "use ChatGptImageRequest instead")]
+pub type ResponsesImageRequest = ChatGptImageRequest;
+
+#[deprecated(note = "use ChatGptReferenceImage instead")]
+pub type ResponsesReferenceImage = ChatGptReferenceImage;
+
+#[deprecated(note = "use ChatGptImageResponse instead")]
+pub type ResponsesImageResponse = ChatGptImageResponse;

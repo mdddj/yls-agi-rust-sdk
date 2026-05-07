@@ -1,20 +1,22 @@
 use crate::{
     error::{Error, Result},
     provider::{
-        AuthMode, ChatStream, ClaudeClient, GeminiClient, HttpClientConfig, OpenAiClient, Provider,
-        ProxyConfig,
+        AuthMode, ChatGptImageClient, ChatStream, ClaudeClient, GeminiClient, HttpClientConfig,
+        OpenAiClient, Provider, ProxyConfig,
     },
-    types::{ChatRequest, ChatResponse},
+    types::{ChatGptImageRequest, ChatGptImageResponse, ChatRequest, ChatResponse},
 };
 use std::sync::Arc;
 
 const DEFAULT_API_KEY_ENV: &str = "YLS_AGI_KEY";
+const DEFAULT_CHATGPT_IMAGE_API_KEY_ENV: &str = "YLS_CODEX_KEY";
 
 #[derive(Clone)]
 pub struct Client {
     openai: Arc<OpenAiClient>,
     gemini: Arc<GeminiClient>,
     claude: Arc<ClaudeClient>,
+    chatgpt_image: Arc<ChatGptImageClient>,
 }
 
 impl Client {
@@ -46,6 +48,13 @@ impl Client {
         }
     }
 
+    pub async fn generate_chatgpt_image(
+        &self,
+        request: ChatGptImageRequest,
+    ) -> Result<ChatGptImageResponse> {
+        self.chatgpt_image.generate_image(request).await
+    }
+
     pub fn openai(&self) -> &OpenAiClient {
         &self.openai
     }
@@ -57,24 +66,46 @@ impl Client {
     pub fn claude(&self) -> &ClaudeClient {
         &self.claude
     }
+
+    pub fn chatgpt_image(&self) -> &ChatGptImageClient {
+        &self.chatgpt_image
+    }
+
+    #[deprecated(note = "use generate_chatgpt_image instead")]
+    pub async fn generate_image_via_responses(
+        &self,
+        request: ChatGptImageRequest,
+    ) -> Result<ChatGptImageResponse> {
+        self.generate_chatgpt_image(request).await
+    }
+
+    #[deprecated(note = "use chatgpt_image instead")]
+    pub fn responses(&self) -> &ChatGptImageClient {
+        self.chatgpt_image()
+    }
 }
 
 impl Default for Client {
     fn default() -> Self {
         Self::from_env().unwrap_or_else(|err| {
-            panic!("failed to build default Client from {DEFAULT_API_KEY_ENV}: {err}")
+            panic!(
+                "failed to build default Client from {DEFAULT_API_KEY_ENV}/{DEFAULT_CHATGPT_IMAGE_API_KEY_ENV}: {err}"
+            )
         })
     }
 }
 
 pub struct ClientBuilder {
     api_key: String,
+    chatgpt_image_api_key: Option<String>,
     openai_auth_mode: AuthMode,
     gemini_auth_mode: AuthMode,
     claude_auth_mode: AuthMode,
+    chatgpt_image_auth_mode: AuthMode,
     openai_base_url: Option<String>,
     gemini_base_url: Option<String>,
     claude_base_url: Option<String>,
+    chatgpt_image_base_url: Option<String>,
     http_client_config: HttpClientConfig,
 }
 
@@ -82,12 +113,15 @@ impl ClientBuilder {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            chatgpt_image_api_key: None,
             openai_auth_mode: AuthMode::AuthorizationBearer,
             gemini_auth_mode: AuthMode::XGoogApiKey,
             claude_auth_mode: AuthMode::AuthorizationKey,
+            chatgpt_image_auth_mode: AuthMode::AuthorizationBearer,
             openai_base_url: None,
             gemini_base_url: None,
             claude_base_url: None,
+            chatgpt_image_base_url: None,
             http_client_config: HttpClientConfig::default(),
         }
     }
@@ -95,7 +129,10 @@ impl ClientBuilder {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var(DEFAULT_API_KEY_ENV)
             .map_err(|_| Error::MissingEnvVar(DEFAULT_API_KEY_ENV))?;
-        Ok(Self::new(api_key))
+        let chatgpt_image_api_key = std::env::var(DEFAULT_CHATGPT_IMAGE_API_KEY_ENV)
+            .map_err(|_| Error::MissingEnvVar(DEFAULT_CHATGPT_IMAGE_API_KEY_ENV))?;
+
+        Ok(Self::new(api_key).with_chatgpt_image_api_key(chatgpt_image_api_key))
     }
 
     pub fn with_openai_auth_mode(mut self, auth_mode: AuthMode) -> Self {
@@ -110,6 +147,16 @@ impl ClientBuilder {
 
     pub fn with_claude_auth_mode(mut self, auth_mode: AuthMode) -> Self {
         self.claude_auth_mode = auth_mode;
+        self
+    }
+
+    pub fn with_chatgpt_image_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.chatgpt_image_api_key = Some(api_key.into());
+        self
+    }
+
+    pub fn with_chatgpt_image_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.chatgpt_image_auth_mode = auth_mode;
         self
     }
 
@@ -128,6 +175,21 @@ impl ClientBuilder {
         self
     }
 
+    pub fn with_chatgpt_image_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.chatgpt_image_base_url = Some(base_url.into());
+        self
+    }
+
+    #[deprecated(note = "use with_chatgpt_image_auth_mode instead")]
+    pub fn with_responses_auth_mode(self, auth_mode: AuthMode) -> Self {
+        self.with_chatgpt_image_auth_mode(auth_mode)
+    }
+
+    #[deprecated(note = "use with_chatgpt_image_base_url instead")]
+    pub fn with_responses_base_url(self, base_url: impl Into<String>) -> Self {
+        self.with_chatgpt_image_base_url(base_url)
+    }
+
     pub fn with_proxy(mut self, proxy_url: impl Into<String>) -> Self {
         self.http_client_config.proxy = Some(ProxyConfig::Custom(proxy_url.into()));
         self
@@ -144,6 +206,10 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client> {
+        let chatgpt_image_api_key = self
+            .chatgpt_image_api_key
+            .clone()
+            .unwrap_or_else(|| self.api_key.clone());
         let openai = OpenAiClient::with_config(
             self.api_key.clone(),
             url::Url::parse(
@@ -165,13 +231,23 @@ impl ClientBuilder {
             self.http_client_config.clone(),
         )?;
         let claude = ClaudeClient::with_config(
-            self.api_key,
+            self.api_key.clone(),
             url::Url::parse(
                 self.claude_base_url
                     .as_deref()
                     .unwrap_or("https://api.ylsagi.com/claude/v1/"),
             )?,
             self.claude_auth_mode,
+            self.http_client_config.clone(),
+        )?;
+        let chatgpt_image = ChatGptImageClient::with_config(
+            chatgpt_image_api_key,
+            url::Url::parse(
+                self.chatgpt_image_base_url
+                    .as_deref()
+                    .unwrap_or("https://code.ylsagi.com/codex/"),
+            )?,
+            self.chatgpt_image_auth_mode,
             self.http_client_config,
         )?;
 
@@ -179,6 +255,7 @@ impl ClientBuilder {
             openai: Arc::new(openai),
             gemini: Arc::new(gemini),
             claude: Arc::new(claude),
+            chatgpt_image: Arc::new(chatgpt_image),
         })
     }
 }

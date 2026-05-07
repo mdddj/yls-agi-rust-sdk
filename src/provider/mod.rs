@@ -1,11 +1,14 @@
 mod claude;
 mod gemini;
 mod openai;
+mod responses;
 mod sse;
 
 pub use claude::ClaudeClient;
 pub use gemini::GeminiClient;
 pub use openai::OpenAiClient;
+#[allow(deprecated)]
+pub use responses::{ChatGptImageClient, ResponsesClient};
 
 use crate::{
     error::Result,
