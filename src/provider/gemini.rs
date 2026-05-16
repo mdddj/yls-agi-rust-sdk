@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::error::Error as StdError;
 use tokio::time::{Duration, sleep};
 use url::Url;
 
@@ -232,7 +233,7 @@ impl GeminiClient {
         let response = request.send().await.map_err(|err| {
             HttpRequestFailure::Retryable(Error::provider(
                 "gemini",
-                format!("request transport error: {err}"),
+                format!("request transport error: {}", format_reqwest_error(&err)),
             ))
         })?;
         let status = response.status();
@@ -287,10 +288,12 @@ impl GeminiClient {
             &self.config.api_key,
         );
 
-        let response = request
-            .send()
-            .await
-            .map_err(|err| Error::provider("gemini", format!("stream transport error: {err}")))?;
+        let response = request.send().await.map_err(|err| {
+            Error::provider(
+                "gemini",
+                format!("stream transport error: {}", format_reqwest_error(&err)),
+            )
+        })?;
         let status = response.status();
 
         if status.is_success() {
@@ -627,6 +630,34 @@ fn truncate_error_body(body: &str) -> String {
         body.to_string()
     } else {
         format!("{}...(truncated)", &body[..MAX_LEN])
+    }
+}
+
+fn format_reqwest_error(err: &reqwest::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+
+    while let Some(err) = source {
+        message.push_str("; caused by: ");
+        message.push_str(&err.to_string());
+        source = err.source();
+    }
+
+    let mut labels = Vec::new();
+    if err.is_timeout() {
+        labels.push("timeout");
+    }
+    if err.is_connect() {
+        labels.push("connect");
+    }
+    if err.is_request() {
+        labels.push("request");
+    }
+
+    if labels.is_empty() {
+        message
+    } else {
+        format!("{message} [{}]", labels.join(", "))
     }
 }
 

@@ -181,6 +181,9 @@ impl ChatGptImageClient {
             "input": input,
             "stream": true,
             "tools": [Value::Object(tool)],
+            "tool_choice": {
+                "type": "image_generation"
+            },
         })
     }
 
@@ -209,6 +212,7 @@ pub type ResponsesClient = ChatGptImageClient;
 async fn collect_terminal_payload(response: reqwest::Response) -> Result<Value> {
     let mut stream = response.bytes_stream().eventsource();
     let mut final_payload = None;
+    let mut recent_events = Vec::new();
 
     while let Some(event) = stream.next().await {
         let event =
@@ -216,6 +220,7 @@ async fn collect_terminal_payload(response: reqwest::Response) -> Result<Value> 
         let Some(payload) = parse_event_payload(&event.data) else {
             continue;
         };
+        push_recent_event(&mut recent_events, summarize_event_payload(&payload));
 
         if let Some(error_payload) = extract_gateway_error(&payload) {
             return Err(Error::provider(
@@ -233,7 +238,10 @@ async fn collect_terminal_payload(response: reqwest::Response) -> Result<Value> 
     final_payload.ok_or_else(|| {
         Error::provider(
             "chatgpt_image",
-            "No image_generation_call result found in streamed SSE events.",
+            format!(
+                "No image_generation_call result found in streamed SSE events. recent_events={}",
+                format_recent_events(&recent_events)
+            ),
         )
     })
 }
@@ -272,15 +280,62 @@ fn extract_image_result(payload: &Value) -> Option<&str> {
     }
 }
 
+fn push_recent_event(events: &mut Vec<String>, summary: String) {
+    const MAX_RECENT_EVENTS: usize = 8;
+    if events.len() == MAX_RECENT_EVENTS {
+        events.remove(0);
+    }
+    events.push(summary);
+}
+
+fn summarize_event_payload(payload: &Value) -> String {
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let item_type = payload
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let output_index = payload
+        .get("output_index")
+        .and_then(Value::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let response_status = payload
+        .get("response")
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let has_result = payload
+        .get("item")
+        .and_then(|item| item.get("result"))
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    format!(
+        "{{type={event_type}, item_type={item_type}, output_index={output_index}, response_status={response_status}, has_result={has_result}}}"
+    )
+}
+
+fn format_recent_events(events: &[String]) -> String {
+    if events.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", events.join(", "))
+    }
+}
+
 fn normalize_image_result(result: &str) -> String {
     let trimmed = result.trim();
-    if let Some((_, data)) = trimmed.rsplit_once(',') {
-        if trimmed
+    if let Some((_, data)) = trimmed.rsplit_once(',')
+        && trimmed
             .get(..5)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
-        {
-            return data.to_string();
-        }
+    {
+        return data.to_string();
     }
     trimmed.to_string()
 }

@@ -464,7 +464,7 @@ async fn chatgpt_image_generation_request_shape_is_correct() {
             }]
         })))
         .respond_with(ResponseTemplate::new(200).set_body_string(
-            &format!(
+            format!(
                 "data: {{\"type\":\"response.output_item.done\",\"response\":{{\"model\":\"gpt-5.4\"}},\"item\":{{\"type\":\"image_generation_call\",\"result\":\"data:image/png;base64,{png_header_base64}\"}}}}\n\n\
              data: [DONE]\n\n",
             ),
